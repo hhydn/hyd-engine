@@ -25,7 +25,7 @@ def init(cuda_malloc: bool, cuda_streams: int) -> None:
     print(f"Extra Streams: {len(_streams)}")
 
 
-def load_model(model: torch.nn.Module, tensor: torch.Tensor, evaluations: int | None = None) -> None:
+def register_model(model: torch.nn.Module, tensor: torch.Tensor, evaluations: int | None = None) -> None:
     if model not in _model_storage_memory:
         _model_storage_memory[model] = _get_storage_size(model)
         _model_runtime_memory[model] = _get_cuda_forward_pass(model, tensor) + _get_storage_size(tensor=tensor)

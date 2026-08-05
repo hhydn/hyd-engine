@@ -1,0 +1,7 @@
+python=3.13.12
+pillow=12.3.0
+pyside6=6.11.1
+torch=2.13.0+cu130
+transformers=5.14.1
+safetensors=0.8.0
+numpy=2.5.1
