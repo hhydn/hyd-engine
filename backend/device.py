@@ -1,38 +1,40 @@
 import torch
 
 
-_streams: list[torch.cuda.Stream] = []
+_CUDA_STREAM: int = 1
+_cuda_stream: list[torch.cuda.Stream] = []
 
-_model_storage_memory: dict[torch.nn.Module, int] = {}
-_model_runtime_memory: dict[torch.nn.Module, int] = {}
+_model_storage: dict[torch.nn.Module, int] = {}
+_model_runtime: dict[torch.nn.Module, int] = {}
 _model_priority: dict[torch.nn.Module, int] = {}
 
 _model_device: dict[torch.nn.Module, torch.device] = {}
 
 
-def init(cuda_malloc: bool, cuda_streams: int) -> None:
-    import os
-    if cuda_malloc:
-        os.environ["PYTORCH_ALLOC_CONF"] = "backend:cudaMallocAsync"
-    else:
-        os.environ.pop("PYTORCH_ALLOC_CONF", None)
-    enabled = torch.cuda.memory.get_allocator_backend() == "cudaMallocAsync"
-    print(f"cudaMallocAsync: {'Enabled' if enabled else 'Disabled'}")
+def init(settings: dict[str, bool | int | str]) -> None:
+    if settings["cuda_malloc"] == True:
+        enabled = torch.cuda.memory.get_allocator_backend() == "cudaMallocAsync"
+        print(f"cudaMallocAsync: {'Enabled' if enabled else 'Disabled'}")
 
-    _streams.clear()
-    for _ in range(cuda_streams):
-        _streams.append(torch.cuda.Stream(device=torch.device("cuda")))
-    print(f"Extra Streams: {len(_streams)}")
+    _cuda_stream.clear()
+    _cuda_stream.append(torch.cuda.default_stream())
+
+    cuda_stream: int = int(settings["cuda_stream"])
+    if cuda_stream >= 1:
+        for _ in range(cuda_stream):
+            _cuda_stream.append(torch.cuda.Stream())
+
+        print(f"CUDA Stream: {len(_cuda_stream)}")
 
 
-def register_model(model: torch.nn.Module, tensor: torch.Tensor, evaluations: int | None = None) -> None:
-    if model not in _model_storage_memory:
-        _model_storage_memory[model] = _get_storage_size(model)
-        _model_runtime_memory[model] = _get_cuda_forward_pass(model, tensor) + _get_storage_size(tensor=tensor)
+def register_model(model: torch.nn.Module, tensor: torch.Tensor, timesteps: int | None = None) -> None:
+    if model not in _model_storage:
+        _model_storage[model] = _get_storage_size(model)
+        _model_runtime[model] = _get_cuda_forward_pass(model, tensor) + _get_storage_size(tensor=tensor)
         _empty_cuda_cache()
 
-    if evaluations is not None:
-        _model_priority[model] = evaluations * _model_storage_memory[model]
+    if timesteps is not None:
+        _model_priority[model] = timesteps * _model_storage[model]
         _set_devices()
     
 
@@ -43,8 +45,8 @@ def _set_devices() -> None:
     models_by_priority: list[torch.nn.Module] = sorted(_model_priority, key=lambda model: _model_priority[model], reverse=True)
 
     for model in models_by_priority:
-        proposed_storage: int = stored_memory + _model_storage_memory[model]
-        proposed_runtime: int = max(runtime_memory, _model_runtime_memory[model])
+        proposed_storage: int = stored_memory + _model_storage[model]
+        proposed_runtime: int = max(runtime_memory, _model_runtime[model])
 
         if proposed_storage + proposed_runtime <= free_memory + allocated_memory:
             device = torch.device("cuda")

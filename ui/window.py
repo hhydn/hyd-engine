@@ -1,7 +1,7 @@
 from PySide6 import QtWidgets
 
 
-def start() -> None:
+def ready() -> None:
     app = QtWidgets.QApplication([])
 
     window = QtWidgets.QMainWindow()
