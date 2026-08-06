@@ -2,10 +2,12 @@ from collections.abc import Callable
 from importlib import import_module
 from pathlib import Path
 from pkgutil import walk_packages
+from time import perf_counter, sleep
 
 
 _init_callables: list[Callable[[dict[str, bool | int | str]], object | None]] = []
 _ready_callables: list[Callable[[], object | None]] = []
+_process_callables: list[Callable[[], object | None]] = []
 
 
 def _setup(settings: dict[str, bool | int | str]) -> None:
@@ -30,12 +32,14 @@ def _find_functions() -> None:
 
         init_function = module.__dict__.get("init")
         ready_function = module.__dict__.get("ready")
+        process_function = module.__dict__.get("process")
 
         if callable(init_function):
             _init_callables.append(init_function)
-
         if callable(ready_function):
             _ready_callables.append(ready_function)
+        if callable(process_function):
+            _process_callables.append(process_function)
 
 
 def _init(settings: dict[str, bool | int | str]) -> None:
@@ -48,6 +52,22 @@ def _ready() -> None:
         function()
 
 
+def _process() -> None:
+    interval: float = 0.25
+    next_process: float = perf_counter()
+
+    while True:
+        current_time: float = perf_counter()
+
+        if current_time >= next_process:
+            for function in _process_callables:
+                function()
+
+            next_process = current_time + interval
+
+        sleep(max(0.0, next_process - perf_counter()))
+
+
 if __name__ == "__main__":
     import json
 
@@ -58,3 +78,4 @@ if __name__ == "__main__":
     _find_functions()
     _init(settings)
     _ready()
+    _process()

@@ -1,7 +1,6 @@
 import torch
 
 
-_CUDA_STREAM: int = 1
 _cuda_stream: list[torch.cuda.Stream] = []
 
 _model_storage: dict[torch.nn.Module, int] = {}
@@ -12,10 +11,6 @@ _model_device: dict[torch.nn.Module, torch.device] = {}
 
 
 def init(settings: dict[str, bool | int | str]) -> None:
-    if settings["cuda_malloc"] == True:
-        enabled = torch.cuda.memory.get_allocator_backend() == "cudaMallocAsync"
-        print(f"cudaMallocAsync: {'Enabled' if enabled else 'Disabled'}")
-
     _cuda_stream.clear()
     _cuda_stream.append(torch.cuda.default_stream())
 
@@ -24,7 +19,12 @@ def init(settings: dict[str, bool | int | str]) -> None:
         for _ in range(cuda_stream):
             _cuda_stream.append(torch.cuda.Stream())
 
-        print(f"CUDA Stream: {len(_cuda_stream)}")
+
+def ready() -> None:
+    enabled = torch.cuda.memory.get_allocator_backend() == "cudaMallocAsync"
+    print(f"cudaMallocAsync: {'Enabled' if enabled else 'Disabled'}")
+
+    print(f"CUDA Stream: {len(_cuda_stream)}")
 
 
 def register_model(model: torch.nn.Module, tensor: torch.Tensor, timesteps: int | None = None) -> None:
