@@ -3,12 +3,20 @@ from importlib import import_module
 from pathlib import Path
 from pkgutil import walk_packages
 from time import perf_counter, sleep
+from types import ModuleType
 
 
-_init_callables: list[Callable[[dict[str, bool | int | str]], object | None]] = []
-_ready_callables: list[Callable[[], object | None]] = []
-_process_callables: list[Callable[[], object | None]] = []
+_SETTINGS_PATH: Path = Path(__file__).parent / "settings.json"
 
+_hooks_dict: dict[str, list[Callable[..., object | None]]] = {
+    "init": [],  # Passes settings as argument.
+    "ready": [],
+    "process": [],  # Must be called last.
+}
+_signals_dict: dict[tuple[str, str], list[Callable[..., object | None]]] = {
+    ("inference_changed", "on_inference_changed"): [],
+    ("inference_clicked", "on_inference_pressed"): [],
+}
 
 def _setup(settings: dict[str, bool | int | str]) -> None:
     import os
@@ -21,46 +29,78 @@ def _setup(settings: dict[str, bool | int | str]) -> None:
         os.environ.pop("PYTORCH_ALLOC_CONF", None)
 
 
-def _find_functions() -> None:
+def _get_modules() -> list[ModuleType]:
+    modules: list[ModuleType] = []
     root: Path = Path(__file__).parent
 
     for module_info in walk_packages([str(root)]):
-        if module_info.name == "main":
-            continue
+        if module_info.name != Path(__file__).stem:
+            module: ModuleType = import_module(module_info.name)
+            modules.append(module)
 
-        module = import_module(module_info.name)
-
-        init_function = module.__dict__.get("init")
-        ready_function = module.__dict__.get("ready")
-        process_function = module.__dict__.get("process")
-
-        if callable(init_function):
-            _init_callables.append(init_function)
-        if callable(ready_function):
-            _ready_callables.append(ready_function)
-        if callable(process_function):
-            _process_callables.append(process_function)
+    return modules
 
 
-def _init(settings: dict[str, bool | int | str]) -> None:
-    for function in _init_callables:
-        function(settings)
+def _set_dispatcher(modules: list[ModuleType]) -> dict[str, list[object]]:
+    signal_objects: dict[str, list[object]] = {}
+
+    for object_name, _ in _signals_dict:
+        signal_objects[object_name] = []
+
+    for module in modules:
+        for hook_name, hooks in _hooks_dict.items():
+            function = module.__dict__.get(hook_name)
+
+            if callable(function):
+                hooks.append(function)
+
+        for (signal_name, hook_name), signal_hooks in _signals_dict.items():
+            signal = module.__dict__.get(signal_name)
+
+            if signal is not None:
+                signal_objects[signal_name].append(signal)
+
+            function = module.__dict__.get(hook_name)
+
+            if callable(function):
+                signal_hooks.append(function)
+
+    return signal_objects
 
 
-def _ready() -> None:
-    for function in _ready_callables:
-        function()
+def _call_hooks(settings: dict[str, bool | int | str]) -> None:
+    for name, functions in _hooks_dict.items():
+        for function in functions:
+
+            if name != next(reversed(_hooks_dict.keys())):
+                if name == "init":
+                    function(settings)
+                else:
+                    function()
 
 
-def _process() -> None:
-    interval: float = 0.25
+def _connect_signals(signal_objects: dict[str, list[object]]) -> None:
+    from typing import cast
+    from PySide6.QtCore import SignalInstance
+
+    for (signal_name, _), signal_hooks in _signals_dict.items():
+        for signal_object in signal_objects[signal_name]:
+            signal: SignalInstance = cast(SignalInstance, signal_object)
+
+            for function in signal_hooks:
+                signal.connect(function)
+
+
+def _last_hook() -> None:
+    functions: list[Callable[..., object | None]] = next(reversed(_hooks_dict.values()))
+
+    interval: float = 0.1
     next_process: float = perf_counter()
-
     while True:
         current_time: float = perf_counter()
 
         if current_time >= next_process:
-            for function in _process_callables:
+            for function in functions:
                 function()
 
             next_process = current_time + interval
@@ -71,11 +111,13 @@ def _process() -> None:
 if __name__ == "__main__":
     import json
 
-    settings_path: Path = Path(__file__).parent / "settings.json"
-    settings: dict[str, bool | int | str] = json.loads(settings_path.read_text(encoding="utf-8"))
+    settings: dict[str, bool | int | str] = json.loads(_SETTINGS_PATH.read_text(encoding="utf-8"))
 
     _setup(settings)
-    _find_functions()
-    _init(settings)
-    _ready()
-    _process()
+
+    modules: list[ModuleType] = _get_modules()
+    signal_objects: dict[str, list[object]] = _set_dispatcher(modules)
+
+    _call_hooks(settings)
+    _connect_signals(signal_objects)
+    _last_hook()

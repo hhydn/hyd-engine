@@ -2,6 +2,7 @@ from PySide6 import QtCore, QtWidgets
 
 
 generate_button: QtWidgets.QPushButton = QtWidgets.QPushButton("Generate")
+inference_clicked: QtCore.SignalInstance = generate_button.clicked
 
 
 def ready() -> None:
