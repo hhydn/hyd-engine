@@ -1,20 +1,27 @@
-from PySide6 import QtCore, QtWidgets
+from collections.abc import Callable
+from PySide6 import QtWidgets
 
 
-generate_button: QtWidgets.QPushButton = QtWidgets.QPushButton("Generate")
-inference_clicked: QtCore.SignalInstance = generate_button.clicked
+emit: Callable[..., object]
+
+_generate_button: QtWidgets.QPushButton = QtWidgets.QPushButton("Generate")
+_models_box: QtWidgets.QComboBox = QtWidgets.QComboBox()
+_steps_box: QtWidgets.QSpinBox = QtWidgets.QSpinBox()
+
+_txt2img_widget: QtWidgets.QWidget = QtWidgets.QWidget()
+_txt2img_layout: QtWidgets.QHBoxLayout = QtWidgets.QHBoxLayout(_txt2img_widget)
+
+
+def set_emit(function: Callable[..., None]) -> None:
+    global emit
+    emit = function
 
 
 def ready() -> None:
     from . import app
 
-    layout: QtWidgets.QLayout | None = app.widget.layout()
+    app.main_layout.addWidget(_txt2img_widget, 1, 0)
 
-    if layout:
-        layout.addWidget(generate_button)
-        layout.setAlignment(generate_button, QtCore.Qt.AlignmentFlag.AlignBottom | QtCore.Qt.AlignmentFlag.AlignLeft)
-        generate_button.clicked.connect(_generate)
-
-
-def _generate() -> None:
-    print("generate")
+    _txt2img_layout.addWidget(_generate_button)
+    _txt2img_layout.addWidget(_models_box)
+    _txt2img_layout.addWidget(_steps_box)

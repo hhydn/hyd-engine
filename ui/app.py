@@ -2,19 +2,23 @@ from PySide6 import QtWidgets
 
 
 app: QtWidgets.QApplication = QtWidgets.QApplication([])
-widget: QtWidgets.QWidget = QtWidgets.QWidget()
+main_widget: QtWidgets.QWidget = QtWidgets.QWidget()
+main_layout: QtWidgets.QGridLayout = QtWidgets.QGridLayout(main_widget)
 
 
 def init(_settings: dict[str, bool | int | str]) -> None:
-    layout: QtWidgets.QVBoxLayout = QtWidgets.QVBoxLayout()
-    widget.setLayout(layout)
+    main_widget.setMinimumSize(600, 400)
+    main_widget.resize(1000, 600)
 
-    widget.setMinimumSize(600, 400)
-    widget.resize(1000, 600)
+    main_layout.setRowStretch(0, 2)
+    main_layout.setRowStretch(1, 1)
+
+    main_layout.setColumnStretch(0, 2)
+    main_layout.setColumnStretch(1, 1)
 
 
 def ready() -> None:
-    widget.show()
+    main_widget.show()
 
 
 def process() -> None:

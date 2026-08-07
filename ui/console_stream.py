@@ -3,16 +3,13 @@ import sys
 from types import SimpleNamespace
 from typing import TextIO, cast
 
-from PySide6 import QtCore, QtGui, QtWidgets
+from PySide6 import QtGui, QtWidgets
 
 
 _console: QtWidgets.QPlainTextEdit = QtWidgets.QPlainTextEdit()
 
 
 def init(_settings: dict[str, bool | int | str]) -> None:
-    _console.setFixedSize(250, 500)
-    _console.setReadOnly(True)
-
     stream: TextIO = cast(TextIO, SimpleNamespace(write=_write, flush=lambda: None))
     sys.stdout = stream
     sys.stderr = stream
@@ -21,11 +18,8 @@ def init(_settings: dict[str, bool | int | str]) -> None:
 def ready() -> None:
     from . import app
 
-    layout: QtWidgets.QLayout | None = app.widget.layout()
-
-    if layout:
-        layout.addWidget(_console)
-        layout.setAlignment(_console, QtCore.Qt.AlignmentFlag.AlignBottom | QtCore.Qt.AlignmentFlag.AlignRight)
+    _console.setReadOnly(True)
+    app.main_layout.addWidget(_console, 1, 1)
 
 
 def _write(text: str) -> int:
