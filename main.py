@@ -9,7 +9,6 @@ from types import ModuleType
 _SETTINGS_PATH: Path = Path(__file__).parent / "settings.json"
 
 _hooks_dict: dict[str, list[Callable[..., object | None]]] = {
-    "set_emit": [],
     "init": [],  # Passes settings as argument.
     "ready": [],
     "process": [],  # Must be called last.
@@ -55,6 +54,8 @@ def _get_modules() -> list[ModuleType]:
 
 def _set_dispatcher(modules: list[ModuleType]) -> None:
     for module in modules:
+        module.__dict__["emit"] = emit
+
         for hook_name, hooks in _hooks_dict.items():
             function = module.__dict__.get(hook_name)
 
@@ -72,9 +73,7 @@ def _call_hooks(settings: dict[str, bool | int | str]) -> None:
     for name, functions in _hooks_dict.items():
         for function in functions:
             if name != next(reversed(_hooks_dict.keys())):
-                if name == "set_emit":
-                    function(emit)
-                elif name == "init":
+                if name == "init":
                     function(settings)
                 else:
                     function()
@@ -83,7 +82,7 @@ def _call_hooks(settings: dict[str, bool | int | str]) -> None:
 def _last_hook() -> None:
     functions: list[Callable[..., object | None]] = next(reversed(_hooks_dict.values()))
 
-    interval: float = 0.1
+    interval: float = 1 / 60
     next_process: float = perf_counter()
     while True:
         current_time: float = perf_counter()

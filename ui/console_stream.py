@@ -18,8 +18,10 @@ def init(_settings: dict[str, bool | int | str]) -> None:
 def ready() -> None:
     from . import app
 
-    _console.setReadOnly(True)
+    _console.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Preferred)
     app.main_layout.addWidget(_console, 1, 1)
+
+    _console.setReadOnly(True)
 
 
 def _write(text: str) -> int:
