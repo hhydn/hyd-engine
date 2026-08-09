@@ -1,55 +1,40 @@
 import torch
 
-from enum import Enum
 
-
+_denoiser_dtype: torch.dtype | None = None
+_vae_dtype: torch.dtype | None = None
+_text_encoder_dtype: torch.dtype | None = None
 _fp16_accumulation: bool | None = None
 
 
-class ModelType(Enum):
-    UNET = 1
-    VAE = 2
-    TEXT_ENCODER = 3
-
-
-_registered_models: dict[ModelType, torch.nn.Module] = {}
-_dtype_overrides: dict[ModelType, torch.dtype] = {}
-
-
 def init(settings: dict[str, bool | int | str]) -> None:
-    global _fp16_accumulation
+    global _denoiser_dtype, _vae_dtype, _text_encoder_dtype, _fp16_accumulation
 
+    _denoiser_dtype = getattr(torch, str(settings["denoiser_dtype"]), None)
+    _vae_dtype = getattr(torch, str(settings["vae_dtype"]), None)
+    _text_encoder_dtype = getattr(torch, str(settings["text_encoder_dtype"]), None)
     _fp16_accumulation = settings["fp16_accumulation"] is True
 
 
-def register_unet(model: torch.nn.Module, dtype_override: torch.dtype | None = None) -> None:
-    _registered_models[ModelType.UNET] = model
+def on_denoiser_loaded(model: torch.nn.Module) -> None:
+    if _denoiser_dtype is not None:
+        _set_dtype(model, _denoiser_dtype)
 
-    if dtype_override is not None:
-        _dtype_overrides[ModelType.UNET] = dtype_override
-        _set_dtype(ModelType.UNET, dtype_override)
-
-    _set_fp16_accumulation()
+    _set_fp16_accumulation(model)
 
 
-def register_vae(model: torch.nn.Module, dtype_override: torch.dtype | None = None) -> None:
-    _registered_models[ModelType.VAE] = model
+def on_vae_loaded(model: torch.nn.Module) -> None:
+    if _vae_dtype is not None:
+        _set_dtype(model, _vae_dtype)
 
-    if dtype_override is not None:
-        _dtype_overrides[ModelType.VAE] = dtype_override
-        _set_dtype(ModelType.VAE, dtype_override)
-
-    _set_fp16_accumulation()
+    _set_fp16_accumulation(model)
 
 
-def register_text_encoder(model: torch.nn.Module, dtype_override: torch.dtype | None = None) -> None:
-    _registered_models[ModelType.TEXT_ENCODER] = model
+def on_text_encoder_loaded(model: torch.nn.Module) -> None:
+    if _text_encoder_dtype is not None:
+        _set_dtype(model, _text_encoder_dtype)
 
-    if dtype_override is not None:
-        _dtype_overrides[ModelType.TEXT_ENCODER] = dtype_override
-        _set_dtype(ModelType.TEXT_ENCODER, dtype_override)
-
-    _set_fp16_accumulation()
+    _set_fp16_accumulation(model)
 
 
 def get_module_dtypes(module: torch.nn.Module) -> tuple[dict[str, torch.dtype], dict[str, torch.dtype]]:
@@ -58,16 +43,21 @@ def get_module_dtypes(module: torch.nn.Module) -> tuple[dict[str, torch.dtype], 
     return param_dtypes, buffer_dtypes
 
 
-def _set_dtype(model_type: ModelType, dtype_override: torch.dtype) -> None:
-    for model in _registered_models.values():
-        if _registered_models[model] == model_type and model.torch.dtype != _dtype_overrides[model_type]:
-            model: torch.nn.Module = _registered_models[model_type]
-            model.to(dtype=dtype_override)
+def _set_dtype(model: torch.nn.Module, dtype_override: torch.dtype) -> None:
+    keep_in_fp32_modules: list[str] = list(getattr(model, "_keep_in_fp32_modules", []) or [])
+
+    for name, parameter in model.named_parameters():
+        if parameter.is_floating_point():
+            parameter.data = parameter.data.to(torch.float32 if any(module in name.split(".") for module in keep_in_fp32_modules) else dtype_override)
+
+    for name, buffer in model.named_buffers():
+        if buffer.is_floating_point():
+            buffer.data = buffer.data.to(torch.float32 if any(module in name.split(".") for module in keep_in_fp32_modules) else dtype_override)
 
 
-def _set_fp16_accumulation() -> None:
+def _set_fp16_accumulation(model: torch.nn.Module) -> None:
     if _fp16_accumulation and not torch.backends.cuda.matmul.allow_fp16_accumulation and torch.cuda.get_device_capability()[0] >= 7:
-        contains_fp16_gemm: bool = any(isinstance(module, torch.nn.Linear) and module.weight.dtype == torch.float16 for model in _registered_models.values() for module in model.modules())
+        contains_fp16_gemm: bool = any(isinstance(module, torch.nn.Linear) and module.weight.dtype == torch.float16 for module in model.modules())
 
         if contains_fp16_gemm:
             torch.backends.cuda.matmul.allow_fp16_accumulation = True

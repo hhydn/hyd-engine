@@ -1,4 +1,6 @@
 __pycache__
+**/tokenizer/
+**/tokenizer_2/
 /.vscode
 /.venv
 /settings.json

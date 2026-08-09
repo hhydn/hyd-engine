@@ -4,6 +4,7 @@ from pathlib import Path
 from pkgutil import walk_packages
 from time import perf_counter, sleep
 from types import ModuleType
+from typing import cast
 
 
 _SETTINGS_PATH: Path = Path(__file__).parent / "settings.json"
@@ -13,20 +14,12 @@ _hooks_dict: dict[str, list[Callable[..., object | None]]] = {
     "ready": [],
     "process": [],  # Must be called last.
 }
-_signals_dict: dict[tuple[str, str], list[Callable[..., object | None]]] = {
-    ("generate_clicked", "on_generate_clicked"): [],
-    ("model_changed", "on_model_changed"): [],
-    ("timesteps_changed", "on_timesteps_changed"): [],
-
-    ("files_parsed", "on_files_parsed"): [],
-}
+_signals_dict: dict[str, list[Callable[..., object | None]]] = {}
 
 
-def emit(signal_name: str, *args: object) -> None:
-    for (name, _), functions in _signals_dict.items():
-        if name == signal_name:
-            for function in functions:
-                function(*args)
+def emit(receiver_name: str, *args: object) -> None:
+    for function in _signals_dict[receiver_name]:
+        function(*args)
 
 
 def _setup(settings: dict[str, bool | int | str]) -> None:
@@ -52,21 +45,27 @@ def _get_modules() -> list[ModuleType]:
     return modules
 
 
-def _set_dispatcher(modules: list[ModuleType]) -> None:
+def _register_modules(modules: list[ModuleType]) -> None:
     for module in modules:
         module.__dict__["emit"] = emit
 
-        for hook_name, hooks in _hooks_dict.items():
-            function = module.__dict__.get(hook_name)
+        for function_name, functions in _hooks_dict.items():
+            function = module.__dict__.get(function_name)
 
             if callable(function):
-                hooks.append(function)
+                functions.append(function)
 
-        for (_, hook_name), signal_hooks in _signals_dict.items():
-            function = module.__dict__.get(hook_name)
+        receivers: tuple[str, ...] = cast(tuple[str, ...], module.__dict__.get("SIGNALS", ()))
+
+        for receiver_name in receivers:
+            _signals_dict.setdefault(receiver_name, [])
+
+    for receiver_name, receiver_functions in _signals_dict.items():
+        for module in modules:
+            function = module.__dict__.get(receiver_name)
 
             if callable(function):
-                signal_hooks.append(function)
+                receiver_functions.append(function)
 
 
 def _call_hooks(settings: dict[str, bool | int | str]) -> None:
@@ -104,7 +103,7 @@ if __name__ == "__main__":
     _setup(settings)
 
     modules: list[ModuleType] = _get_modules()
-    _set_dispatcher(modules)
+    _register_modules(modules)
     
     _call_hooks(settings)
     _last_hook()
