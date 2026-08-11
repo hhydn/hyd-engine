@@ -30,7 +30,14 @@ def on_vae_loaded(model: torch.nn.Module) -> None:
     _set_fp16_accumulation(model)
 
 
-def on_text_encoder_loaded(model: torch.nn.Module) -> None:
+def on_text_encoder_loaded(model: torch.nn.Module, _tokenizer: object) -> None:
+    if _text_encoder_dtype is not None:
+        _set_dtype(model, _text_encoder_dtype)
+
+    _set_fp16_accumulation(model)
+
+
+def on_text_encoder_2_loaded(model: torch.nn.Module, _tokenizer: object) -> None:
     if _text_encoder_dtype is not None:
         _set_dtype(model, _text_encoder_dtype)
 

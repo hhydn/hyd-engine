@@ -9,17 +9,11 @@ from typing import cast
 
 _SETTINGS_PATH: Path = Path(__file__).parent / "settings.json"
 
-_hooks_dict: dict[str, list[Callable[..., object | None]]] = {
+_callables_by_hook: dict[str, list[Callable[..., object | None]]] = {
     "init": [],  # Passes settings as argument.
     "ready": [],
     "process": [],  # Must be called last.
 }
-_signals_dict: dict[str, list[Callable[..., object | None]]] = {}
-
-
-def emit(receiver_name: str, *args: object) -> None:
-    for function in _signals_dict[receiver_name]:
-        function(*args)
 
 
 def _setup(settings: dict[str, bool | int | str]) -> None:
@@ -47,31 +41,30 @@ def _get_modules() -> list[ModuleType]:
 
 def _register_modules(modules: list[ModuleType]) -> None:
     for module in modules:
-        module.__dict__["emit"] = emit
-
-        for function_name, functions in _hooks_dict.items():
+        for function_name, functions in _callables_by_hook.items():
             function = module.__dict__.get(function_name)
 
             if callable(function):
                 functions.append(function)
 
-        receivers: tuple[str, ...] = cast(tuple[str, ...], module.__dict__.get("SIGNALS", ()))
+        signals_class: type[object] | None = cast(type[object] | None, module.__dict__.get("Signals"))
 
-        for receiver_name in receivers:
-            _signals_dict.setdefault(receiver_name, [])
+        if signals_class is not None:
+            for receiver_name, receivers_object in signals_class.__dict__.items():
+                if isinstance(receivers_object, list):
+                    receivers = cast(list[Callable[..., object | None]], receivers_object)
 
-    for receiver_name, receiver_functions in _signals_dict.items():
-        for module in modules:
-            function = module.__dict__.get(receiver_name)
+                    for receiver_module in modules:
+                        function = receiver_module.__dict__.get(receiver_name)
 
-            if callable(function):
-                receiver_functions.append(function)
+                        if callable(function):
+                            receivers.append(function)
 
 
 def _call_hooks(settings: dict[str, bool | int | str]) -> None:
-    for name, functions in _hooks_dict.items():
+    for name, functions in _callables_by_hook.items():
         for function in functions:
-            if name != next(reversed(_hooks_dict.keys())):
+            if name != next(reversed(_callables_by_hook.keys())):
                 if name == "init":
                     function(settings)
                 else:
@@ -79,7 +72,7 @@ def _call_hooks(settings: dict[str, bool | int | str]) -> None:
 
 
 def _last_hook() -> None:
-    functions: list[Callable[..., object | None]] = next(reversed(_hooks_dict.values()))
+    functions: list[Callable[..., object | None]] = next(reversed(_callables_by_hook.values()))
 
     interval: float = 1 / 60
     next_process: float = perf_counter()

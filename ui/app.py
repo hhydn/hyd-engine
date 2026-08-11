@@ -8,7 +8,7 @@ main_layout: QtWidgets.QGridLayout = QtWidgets.QGridLayout(main_widget)
 
 def init(_settings: dict[str, bool | int | str]) -> None:
     main_widget.setMinimumSize(600, 400)
-    main_widget.resize(1000, 600)
+    main_widget.showMaximized()
 
     main_layout.setRowStretch(0, 2)
     main_layout.setRowStretch(1, 1)
