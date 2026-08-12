@@ -44,7 +44,7 @@ def ready() -> None:
     _steps_box.setRange(1, 200)
 
 
-def on_models_parsed(model_data: dict[type[object], tuple[list[Path], object]]) -> None:
+def on_meta_parsed(model_data: dict[type[object], tuple[list[Path], object]]) -> None:
     from diffusers.models.unets.unet_2d_condition import UNet2DConditionModel
     from diffusers.models.autoencoders.autoencoder_kl import AutoencoderKL
     from transformers.models.clip.modeling_clip import CLIPTextModel, CLIPTextModelWithProjection
