@@ -43,7 +43,7 @@ def get_conditioning(batch: int) -> tuple[torch.Tensor, torch.Tensor]:
 
 def _tokenize(tokenizer: PreTrainedTokenizerBase, prompt: str, batch: int) -> torch.Tensor:
     tokens: transformers.BatchEncoding = tokenizer([prompt] * batch, padding="max_length", truncation=True, return_tensors="pt")
-    input_ids: torch.Tensor = cast(torch.Tensor, tokens["input_ids"]).to("cpu")
+    input_ids: torch.Tensor = cast(torch.Tensor, tokens["input_ids"]).to("cuda")
 
     return input_ids
 

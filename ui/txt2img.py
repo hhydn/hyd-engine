@@ -34,7 +34,6 @@ def ready() -> None:
 
     _txt2img_widget.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Preferred)
     app.main_layout.addWidget(_txt2img_widget, 1, 0)
-
     _set_grid_layout()
 
     _connect_signals()
@@ -45,21 +44,21 @@ def ready() -> None:
     _steps_box.setRange(1, 200)
 
 
-def on_files_parsed(paths_by_type: dict[type[object], list[Path]]) -> None:
+def on_models_parsed(model_data: dict[type[object], tuple[list[Path], object]]) -> None:
     from diffusers.models.unets.unet_2d_condition import UNet2DConditionModel
     from diffusers.models.autoencoders.autoencoder_kl import AutoencoderKL
     from transformers.models.clip.modeling_clip import CLIPTextModel, CLIPTextModelWithProjection
 
-    for path in paths_by_type[UNet2DConditionModel]:
+    for path in model_data[UNet2DConditionModel][0]:
         _denoiser_box.addItem(path.name, path)
 
-    for path in paths_by_type[AutoencoderKL]:
+    for path in model_data[AutoencoderKL][0]:
         _vae_box.addItem(path.name, path)
 
-    for path in paths_by_type[CLIPTextModel]:
+    for path in model_data[CLIPTextModel][0]:
         _text_encoders_box.addItem(path.name, path)
 
-    for path in paths_by_type[CLIPTextModelWithProjection]:
+    for path in model_data[CLIPTextModelWithProjection][0]:
         _text_encoders_box.addItem(path.name, path)
 
 

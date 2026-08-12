@@ -16,32 +16,21 @@ def init(settings: dict[str, bool | int | str]) -> None:
     _fp16_accumulation = settings["fp16_accumulation"] is True
 
 
-def on_denoiser_loaded(model: torch.nn.Module) -> None:
-    if _denoiser_dtype is not None:
-        _set_dtype(model, _denoiser_dtype)
+def on_models_parsed(model_data: dict[type[object], tuple[object, list[torch.nn.Module]]]) -> None:
+    from diffusers.models.unets.unet_2d_condition import UNet2DConditionModel
+    from diffusers.models.autoencoders.autoencoder_kl import AutoencoderKL
+    from transformers.models.clip.modeling_clip import CLIPTextModel, CLIPTextModelWithProjection
 
-    _set_fp16_accumulation(model)
+    for model_type, (_, meta_models) in model_data.items():
+        for meta_model in meta_models:
+            if model_type is UNet2DConditionModel and _denoiser_dtype is not None:
+                _set_dtype(meta_model, _denoiser_dtype)
+            elif model_type is AutoencoderKL and _vae_dtype is not None:
+                _set_dtype(meta_model, _vae_dtype)
+            elif model_type in (CLIPTextModel, CLIPTextModelWithProjection) and _text_encoder_dtype is not None:
+                _set_dtype(meta_model, _text_encoder_dtype)
 
-
-def on_vae_loaded(model: torch.nn.Module) -> None:
-    if _vae_dtype is not None:
-        _set_dtype(model, _vae_dtype)
-
-    _set_fp16_accumulation(model)
-
-
-def on_text_encoder_loaded(model: torch.nn.Module, _tokenizer: object) -> None:
-    if _text_encoder_dtype is not None:
-        _set_dtype(model, _text_encoder_dtype)
-
-    _set_fp16_accumulation(model)
-
-
-def on_text_encoder_2_loaded(model: torch.nn.Module, _tokenizer: object) -> None:
-    if _text_encoder_dtype is not None:
-        _set_dtype(model, _text_encoder_dtype)
-
-    _set_fp16_accumulation(model)
+            _set_fp16_accumulation(meta_model)
 
 
 def get_module_dtypes(module: torch.nn.Module) -> tuple[dict[str, torch.dtype], dict[str, torch.dtype]]:

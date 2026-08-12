@@ -15,9 +15,8 @@ def init(settings: dict[str, bool | int | str]) -> None:
     _cuda_stream.append(torch.cuda.default_stream())
 
     cuda_stream: int = int(settings["cuda_stream"])
-    if cuda_stream >= 1:
-        for _ in range(cuda_stream):
-            _cuda_stream.append(torch.cuda.Stream())
+    for _ in range(max(0, cuda_stream - 1)):
+        _cuda_stream.append(torch.cuda.Stream())
 
 
 def ready() -> None:
