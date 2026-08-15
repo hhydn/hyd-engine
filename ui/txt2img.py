@@ -44,12 +44,12 @@ def ready() -> None:
     _steps_box.setRange(1, 200)
 
 
-def on_meta_parsed(models: tuple[list[Path], list[object]]) -> None:
+def on_meta_parsed(models_by_path: dict[Path, object]) -> None:
     from diffusers.models.unets.unet_2d_condition import UNet2DConditionModel
     from diffusers.models.autoencoders.autoencoder_kl import AutoencoderKL
     from transformers.models.clip.modeling_clip import CLIPTextModel, CLIPTextModelWithProjection
 
-    for path, model in zip(models[0], models[1]):
+    for path, model in models_by_path.items():
         if isinstance(model, UNet2DConditionModel):
             _denoiser_box.addItem(path.name, path)
         elif isinstance(model, AutoencoderKL):

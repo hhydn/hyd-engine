@@ -1,148 +1,275 @@
+from __future__ import annotations
+import torch
 import safetensors
 
 from pathlib import Path
 from collections.abc import Callable
-
-from diffusers.models.modeling_utils import ModelMixin
-from diffusers.models.unets.unet_2d_condition import UNet2DConditionModel
-from diffusers.models.autoencoders.autoencoder_kl import AutoencoderKL
-
-from transformers.modeling_utils import PreTrainedModel
-from transformers.models.clip import CLIPTextModel, CLIPTextModelWithProjection, CLIPTextConfig
 
 
 class Signals:
     on_meta_parsed: list[Callable[..., object | None]] = []
 
 
+_model_paths: list[Path] = []
+_dtypes_by_model: dict[type[Meta], torch.dtype | None] = {}
+
+
 def init(settings: dict[str, bool | int | str]) -> None:
     model_dir: Path = Path(str(settings["model_path"]))
-    paths: list[Path] = list(model_dir.rglob("*.safetensors"))
+    _model_paths.clear()
+    _model_paths.extend(model_dir.rglob("*.safetensors"))
 
-    model_paths: list[Path] = []
-    meta_models: list[ModelMixin | PreTrainedModel] = []
-
-    for path in paths:
-        model_type: type[ModelMixin] | type[PreTrainedModel] | None = _get_model_type(path)
-        if model_type is not None:
-            model_paths.append(path)
-            meta_models.append(MetaModel(settings, model_type, path).model)
-
-    models: tuple[list[Path], list[ModelMixin | PreTrainedModel]] = (model_paths, meta_models)
-    [receiver(models) for receiver in Signals.on_meta_parsed]
+    _dtypes_by_model.clear()
+    _dtypes_by_model.update({
+        MetaUNet2DConditionModel: getattr(torch, str(settings["denoiser_dtype"]), None),
+        MetaAutoencoderKL: getattr(torch, str(settings["vae_dtype"]), None),
+        MetaCLIPTextModel: getattr(torch, str(settings["text_encoder_dtype"]), None),
+        MetaCLIPTextModelWithProjection: getattr(torch, str(settings["text_encoder_dtype"]), None),
+    })
 
 
-def _get_model_type(path: Path) -> type[ModelMixin] | type[PreTrainedModel] | None:
-    file: safetensors.safe_open = safetensors.safe_open(path, framework="pt")
-    with file:
-        keys: list[str] = list(file.keys())
+def ready() -> None:
+    models_by_path: dict[Path, torch.nn.Module] = {}
+    for path in _model_paths:
+        file: safetensors.safe_open = safetensors.safe_open(path, framework="pt")
+        with file:
 
-        if "conditioner.embedders.1.model.transformer.resblocks.9.mlp.c_proj.bias" in keys and any(key.startswith("model.diffusion_model.") for key in keys):
-            return UNet2DConditionModel
+            meta_type: type[Meta] | None = _get_model_type(file)
+            if meta_type is not None:
+                models_by_path[path] = meta_type(file, _dtypes_by_model[meta_type]).model
 
-        if "conv_in.weight" in keys and "conv_out.weight" in keys and "time_embedding.linear_1.weight" in keys:
-            return UNet2DConditionModel
-
-        if "encoder.conv_in.weight" in keys and "decoder.conv_in.weight" in keys:
-            return AutoencoderKL
-
-        token_embedding_key: str = "text_model.embeddings.token_embedding.weight"
-        if token_embedding_key in keys:
-            embedding_shape: list[int] = list(file.get_slice(token_embedding_key).get_shape())
-            hidden_size: int = embedding_shape[1]
-
-            if hidden_size == 768:
-                return CLIPTextModel
-            elif hidden_size == 1280:
-                return CLIPTextModelWithProjection
-
-        return None
+    for receiver in Signals.on_meta_parsed:
+        receiver(models_by_path)
 
 
-class MetaDtype:
-    import torch
+def _get_model_type(file: safetensors.safe_open) -> type[Meta] | None:
+    keys: list[str] = list(file.keys())
+
+    if (
+        "conditioner.embedders.1.model.transformer.resblocks.9.mlp.c_proj.bias" in keys
+        and any(key.startswith("model.diffusion_model.") for key in keys)
+    ) or (
+        "conv_in.weight" in keys
+        and "conv_out.weight" in keys
+        and "time_embedding.linear_1.weight" in keys
+    ):
+        return MetaUNet2DConditionModel
+
+    if "encoder.conv_in.weight" in keys and "decoder.conv_in.weight" in keys:
+        return MetaAutoencoderKL
+
+    token_embed: str = "text_model.embeddings.token_embedding.weight"
+    if token_embed in keys:
+        embed_shape: list[int] = list(file.get_slice(token_embed).get_shape())
+        size: int = embed_shape[1]
+        if size == 768:
+            return MetaCLIPTextModel
+        elif size == 1280:
+            return MetaCLIPTextModelWithProjection
+
+    return None
+
+
+class Meta:
     import safetensors.torch
 
+    from diffusers.loaders import single_file_utils
+    from transformers.models.clip import CLIPTextConfig
 
-    model: ModelMixin | PreTrainedModel
 
-    _DTYPE_SETTINGS: dict[type[ModelMixin] | type[PreTrainedModel], str] = {
-        UNet2DConditionModel: "denoiser_dtype",
-        AutoencoderKL: "vae_dtype",
-        CLIPTextModel: "text_encoder_dtype",
-        CLIPTextModelWithProjection: "text_encoder_dtype",
+    model: torch.nn.Module
+
+
+    def __init__(self, file: safetensors.safe_open, _dtype: torch.dtype | None = None) -> None:
+        self.ckpt_state_dict: dict[str, torch.Tensor] = {}
+        keys: list[str] = list(file.keys())
+
+        for key in keys:
+            tensors = file.get_slice(key)
+            shape: tuple[int, ...] = tuple(tensors.get_shape())
+            dtype: torch.dtype = self.safetensors.torch._getdtype(tensors.get_dtype())
+            self.ckpt_state_dict[key] = torch.empty(shape, dtype=dtype, device="meta")
+
+
+    def set_dtype(self, state_dict: dict[str, torch.Tensor], dtype: torch.dtype | None, model_type: type[torch.nn.Module]) -> None:
+        if dtype is None:
+            return
+
+        keep_in_fp32_modules: list[str] = getattr(model_type, "_keep_in_fp32_modules", None) or []
+        for key, tensor in state_dict.items():
+            if tensor.is_floating_point():
+                if any(module in key for module in keep_in_fp32_modules):
+                    state_dict[key] = tensor.to(dtype=torch.float32)
+                else:
+                    state_dict[key] = tensor.to(dtype=dtype)
+
+
+class MetaUNet2DConditionModel(Meta):
+    from diffusers.models.unets.unet_2d_condition import UNet2DConditionModel
+
+
+    def __init__(self, file: safetensors.safe_open, dtype: torch.dtype | None = None) -> None:
+        super().__init__(file)
+
+        convert_state_dict = self.single_file_utils.convert_ldm_unet_checkpoint(
+            self.ckpt_state_dict,
+            Configs.SDXL_UNET,
+        )
+        self.set_dtype(convert_state_dict, dtype, self.UNet2DConditionModel)
+        with torch.device("meta"):
+            self.model = self.UNet2DConditionModel.from_config(Configs.SDXL_UNET)
+        self.model.load_state_dict(convert_state_dict, strict=True, assign=True)
+
+
+class MetaAutoencoderKL(Meta):
+    from diffusers.models.autoencoders.autoencoder_kl import AutoencoderKL
+
+
+    def __init__(self, file: safetensors.safe_open, dtype: torch.dtype | None = None) -> None:
+        super().__init__(file)
+
+        convert_state_dict = self.single_file_utils.convert_ldm_vae_checkpoint(
+            self.ckpt_state_dict,
+            Configs.SDXL_VAE,
+        )
+        self.set_dtype(convert_state_dict, dtype, self.AutoencoderKL)
+        with torch.device("meta"):
+            self.model = self.AutoencoderKL.from_config(Configs.SDXL_VAE)
+        self.model.load_state_dict(convert_state_dict, strict=True, assign=True)
+
+
+class MetaCLIPTextModel(Meta):
+    from transformers.models.clip import CLIPTextModel
+
+
+    def __init__(self, file: safetensors.safe_open, dtype: torch.dtype | None = None) -> None:
+        super().__init__(file)
+
+        config = self.CLIPTextConfig.from_dict(Configs.SDXL_CLIP_L)
+        with torch.device("meta"):
+            self.model = self.CLIPTextModel(config)
+        state_dict: dict[str, torch.Tensor] = {key.removeprefix("text_model."): tensor for key, tensor in self.ckpt_state_dict.items()}
+
+        self.set_dtype(state_dict, dtype, self.CLIPTextModel)
+        self.model.load_state_dict(state_dict, strict=True, assign=True)
+
+
+class MetaCLIPTextModelWithProjection(Meta):
+    from transformers.models.clip import CLIPTextModelWithProjection
+
+
+    def __init__(self, file: safetensors.safe_open, dtype: torch.dtype | None = None) -> None:
+        super().__init__(file)
+
+        config = self.CLIPTextConfig.from_dict(Configs.SDXL_CLIP_G)
+        with torch.device("meta"):
+            self.model = self.CLIPTextModelWithProjection(config)
+
+        self.set_dtype(self.ckpt_state_dict, dtype, self.CLIPTextModelWithProjection)
+        self.model.load_state_dict(self.ckpt_state_dict, strict=True, assign=True)
+
+
+class Configs:
+    SDXL_UNET: dict[str, object] = {
+        "act_fn": "silu",
+        "addition_embed_type": "text_time",
+        "addition_embed_type_num_heads": 64,
+        "addition_time_embed_dim": 256,
+        "attention_head_dim": [5, 10, 20],
+        "block_out_channels": [320, 640, 1280],
+        "center_input_sample": False,
+        "class_embed_type": None,
+        "class_embeddings_concat": False,
+        "conv_in_kernel": 3,
+        "conv_out_kernel": 3,
+        "cross_attention_dim": 2048,
+        "cross_attention_norm": None,
+        "down_block_types": ["DownBlock2D", "CrossAttnDownBlock2D", "CrossAttnDownBlock2D"],
+        "downsample_padding": 1,
+        "dual_cross_attention": False,
+        "encoder_hid_dim": None,
+        "encoder_hid_dim_type": None,
+        "flip_sin_to_cos": True,
+        "freq_shift": 0,
+        "in_channels": 4,
+        "layers_per_block": 2,
+        "mid_block_only_cross_attention": None,
+        "mid_block_scale_factor": 1,
+        "mid_block_type": "UNetMidBlock2DCrossAttn",
+        "norm_eps": 1e-05,
+        "norm_num_groups": 32,
+        "num_attention_heads": None,
+        "num_class_embeds": None,
+        "only_cross_attention": False,
+        "out_channels": 4,
+        "projection_class_embeddings_input_dim": 2816,
+        "resnet_out_scale_factor": 1.0,
+        "resnet_skip_time_act": False,
+        "resnet_time_scale_shift": "default",
+        "sample_size": 128,
+        "time_cond_proj_dim": None,
+        "time_embedding_act_fn": None,
+        "time_embedding_dim": None,
+        "time_embedding_type": "positional",
+        "timestep_post_act": None,
+        "transformer_layers_per_block": [1, 2, 10],
+        "up_block_types": ["CrossAttnUpBlock2D", "CrossAttnUpBlock2D", "UpBlock2D"],
+        "upcast_attention": None,
+        "use_linear_projection": True,
     }
 
 
-    def __init__(self, settings: dict[str, bool | int | str], model_type: type[ModelMixin] | type[PreTrainedModel], path: Path) -> None:
-        dtype: MetaDtype.torch.dtype | None = getattr(self.torch, str(settings[self._DTYPE_SETTINGS[model_type]]), None)
-
-        if dtype is not None:
-            self._set_dtype_override(dtype)
-        else:
-            self._set_trained_dtype(path)
-
-
-    def _set_trained_dtype(self, path: Path) -> None:
-        file: safetensors.safe_open = safetensors.safe_open(path, framework="pt")
-        with file:
-            keys: list[str] = list(file.keys())
-
-            for name, parameter in self.model.named_parameters():
-                if name in keys:
-                    dtype: MetaDtype.torch.dtype = self.safetensors.torch._getdtype(file.get_slice(name).get_dtype())
-                    parameter.data = parameter.data.to(dtype=dtype)
-
-            for name, buffer in self.model.named_buffers():
-                if name in keys:
-                    dtype: MetaDtype.torch.dtype = self.safetensors.torch._getdtype(file.get_slice(name).get_dtype())
-                    buffer.data = buffer.data.to(dtype=dtype)
+    SDXL_VAE: dict[str, object] = {
+        "act_fn": "silu",
+        "block_out_channels": [128, 256, 512, 512],
+        "down_block_types": ["DownEncoderBlock2D", "DownEncoderBlock2D", "DownEncoderBlock2D", "DownEncoderBlock2D"],
+        "force_upcast": True,
+        "in_channels": 3,
+        "latent_channels": 4,
+        "layers_per_block": 2,
+        "norm_num_groups": 32,
+        "out_channels": 3,
+        "sample_size": 1024,
+        "scaling_factor": 0.13025,
+        "up_block_types": ["UpDecoderBlock2D", "UpDecoderBlock2D", "UpDecoderBlock2D", "UpDecoderBlock2D"],
+    }
 
 
-    def _set_dtype_override(self, dtype: torch.dtype) -> None:
-        keep_in_fp32_modules: list[str] = list(getattr(self.model, "_keep_in_fp32_modules", []) or [])
-
-        for name, parameter in self.model.named_parameters():
-            if parameter.is_floating_point():
-                parameter.data = parameter.data.to(self.torch.float32 if any(module in name.split(".") for module in keep_in_fp32_modules) else dtype)
-
-        for name, buffer in self.model.named_buffers():
-            if buffer.is_floating_point():
-                buffer.data = buffer.data.to(self.torch.float32 if any(module in name.split(".") for module in keep_in_fp32_modules) else dtype)
-
-
-class MetaModel(MetaDtype):
-    import sys
-    import json
-
-
-    _CONFIG_PATHS: tuple[Path, ...] = (
-        Path(sys.argv[0]).resolve().parent / "resources" / "sdxl" / "denoiser.json",
-        Path(sys.argv[0]).resolve().parent / "resources" / "sdxl" / "vae.json",
-        Path(sys.argv[0]).resolve().parent / "resources" / "sdxl" / "text_encoder.json",
-        Path(sys.argv[0]).resolve().parent / "resources" / "sdxl" / "text_encoder_2.json",
-    )
+    SDXL_CLIP_L: dict[str, object] = {
+        "attention_dropout": 0.0,
+        "bos_token_id": 0,
+        "dropout": 0.0,
+        "eos_token_id": 2,
+        "hidden_act": "quick_gelu",
+        "hidden_size": 768,
+        "initializer_factor": 1.0,
+        "initializer_range": 0.02,
+        "intermediate_size": 3072,
+        "layer_norm_eps": 1e-05,
+        "max_position_embeddings": 77,
+        "num_attention_heads": 12,
+        "num_hidden_layers": 12,
+        "pad_token_id": 1,
+        "projection_dim": 768,
+        "vocab_size": 49408,
+    }
 
 
-    def __init__(self, settings: dict[str, bool | int | str], model_type: type[ModelMixin] | type[PreTrainedModel], path: Path) -> None:
-        with self.torch.device("meta"):
-            if model_type is UNet2DConditionModel:
-                diffusers_config: dict[str, object] = self.json.loads(self._CONFIG_PATHS[0].read_text(encoding="utf-8"))
-                self.model = UNet2DConditionModel.from_config(diffusers_config)
-
-            elif model_type is AutoencoderKL:
-                diffusers_config: dict[str, object] = self.json.loads(self._CONFIG_PATHS[1].read_text(encoding="utf-8"))
-                self.model = AutoencoderKL.from_config(diffusers_config)
-
-            elif model_type is CLIPTextModel:
-                transformers_config: CLIPTextConfig = CLIPTextConfig.from_json_file(str(self._CONFIG_PATHS[2]))
-                self.model = CLIPTextModel(transformers_config)
-
-            elif model_type is CLIPTextModelWithProjection:
-                transformers_config: CLIPTextConfig = CLIPTextConfig.from_json_file(str(self._CONFIG_PATHS[3]))
-                self.model = CLIPTextModelWithProjection(transformers_config)
-    
-            else:
-                raise TypeError(f"Unsupported model type: {model_type.__name__}")
-
-        super().__init__(settings, model_type, path)
+    SDXL_CLIP_G: dict[str, object] = {
+        "attention_dropout": 0.0,
+        "bos_token_id": 0,
+        "dropout": 0.0,
+        "eos_token_id": 2,
+        "hidden_act": "gelu",
+        "hidden_size": 1280,
+        "initializer_factor": 1.0,
+        "initializer_range": 0.02,
+        "intermediate_size": 5120,
+        "layer_norm_eps": 1e-05,
+        "max_position_embeddings": 77,
+        "num_attention_heads": 20,
+        "num_hidden_layers": 32,
+        "pad_token_id": 1,
+        "projection_dim": 1280,
+        "vocab_size": 49408,
+    }
