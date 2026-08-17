@@ -63,7 +63,33 @@ def _get_model_type(state_dict: dict[str, torch.Tensor]) -> type[object] | None:
     return None
 
 
-class UNet2DConditionModel:
+class Mapping:
+    state_dict: dict[str, torch.Tensor]
+
+
+    def get_prefix_removed(self, orig_state_dict: dict[str, torch.Tensor], prefix: str) -> dict[str, torch.Tensor]:
+        state_dict: dict[str, torch.Tensor] = {}
+        for key, tensor in orig_state_dict.items():
+            if key.startswith(prefix):
+                state_dict[key.removeprefix(prefix)] = tensor
+            else:
+                state_dict[key] = tensor
+        return state_dict
+
+    def get_direct_mapping(self, orig_state_dict: dict[str, torch.Tensor], mapping: dict[str, str]) -> dict[str, torch.Tensor]:
+        direct_mapping: dict[str, torch.Tensor] = {}
+        for old_key, new_key in mapping.items():
+            if old_key in orig_state_dict:
+                direct_mapping[new_key] = orig_state_dict[old_key]
+        return direct_mapping
+
+    def get_mapping(self, key: str, replace: dict[str, str]) -> str:
+        for old, new in replace.items():
+            key = key.replace(old, new)
+        return key
+
+
+class UNet2DConditionModel(Mapping):
     _DIRECT_MAPPING: dict[str, str] = {
         "time_embed.0.weight": "time_embedding.linear_1.weight",
         "time_embed.0.bias": "time_embedding.linear_1.bias",
@@ -80,20 +106,19 @@ class UNet2DConditionModel:
         "label_emb.0.2.weight": "add_embedding.linear_2.weight",
         "label_emb.0.2.bias": "add_embedding.linear_2.bias",
     }
-    _RESNET_MAPPING: tuple[tuple[str, str], ...] = (
-        ("in_layers.0", "norm1"),
-        ("in_layers.2", "conv1"),
-        ("out_layers.0", "norm2"),
-        ("out_layers.3", "conv2"),
-        ("emb_layers.1", "time_emb_proj"),
-        ("skip_connection", "conv_shortcut"),
-    )
-    state_dict: dict[str, torch.Tensor]
+    _RESNET_MAPPING: dict[str, str] = {
+        "in_layers.0": "norm1",
+        "in_layers.2": "conv1",
+        "out_layers.0": "norm2",
+        "out_layers.3": "conv2",
+        "emb_layers.1": "time_emb_proj",
+        "skip_connection": "conv_shortcut",
+    }
 
 
     def __init__(self, orig_state_dict: dict[str, torch.Tensor]) -> None:
-        self.state_dict = {}
-        self._set_direct_mapping(orig_state_dict)
+        orig_state_dict = self.get_prefix_removed(orig_state_dict, "model.diffusion_model.")
+        self.state_dict = self.get_direct_mapping(orig_state_dict, self._DIRECT_MAPPING)
 
         for key, tensor in orig_state_dict.items():
             parts: list[str] = key.split(".")
@@ -103,16 +128,6 @@ class UNet2DConditionModel:
                 self._set_mid_block(parts, tensor)
             elif parts[0] == "output_blocks" and len(parts) >= 4:
                 self._set_up_block(parts, tensor)
-
-    def _set_direct_mapping(self, orig_state_dict: dict[str, torch.Tensor]) -> None:
-        keys: list[str] = list(orig_state_dict.keys())
-        for key in keys:
-            if key.startswith("model.diffusion_model."):
-                orig_state_dict[key.removeprefix("model.diffusion_model.")] = orig_state_dict.pop(key)
-
-        for old_key, new_key in self._DIRECT_MAPPING.items():
-            if old_key in orig_state_dict:
-                self.state_dict[new_key] = orig_state_dict[old_key]
 
     def _set_down_block(self, parts: list[str], tensor: torch.Tensor) -> None:
         block: int = int(parts[1])
@@ -125,7 +140,7 @@ class UNet2DConditionModel:
             if module_id == 0 and suffix in ("op.weight", "op.bias"):
                 self.state_dict[f"down_blocks.{block_id}.downsamplers.0.conv.{suffix.removeprefix('op.')}"] = tensor
             elif module_id == 0:
-                suffix = self._get_resnet_mapping(suffix)
+                suffix = self.get_mapping(suffix, self._RESNET_MAPPING)
                 self.state_dict[f"down_blocks.{block_id}.resnets.{layer_id}.{suffix}"] = tensor
             elif module_id == 1:
                 self.state_dict[f"down_blocks.{block_id}.attentions.{layer_id}.{suffix}"] = tensor
@@ -137,7 +152,7 @@ class UNet2DConditionModel:
         if block == 1:
             self.state_dict[f"mid_block.attentions.0.{suffix}"] = tensor
         else:
-            suffix = self._get_resnet_mapping(suffix)
+            suffix = self.get_mapping(suffix, self._RESNET_MAPPING)
             layer_id: int = 0 if block == 0 else 1
             self.state_dict[f"mid_block.resnets.{layer_id}.{suffix}"] = tensor
 
@@ -149,20 +164,15 @@ class UNet2DConditionModel:
         suffix: str = ".".join(parts[3:])
 
         if module_id == 0:
-            suffix = self._get_resnet_mapping(suffix)
+            suffix = self.get_mapping(suffix, self._RESNET_MAPPING)
             self.state_dict[f"up_blocks.{block_id}.resnets.{layer_id}.{suffix}"] = tensor
         elif suffix in ("conv.weight", "conv.bias"):
             self.state_dict[f"up_blocks.{block_id}.upsamplers.0.{suffix}"] = tensor
         elif module_id == 1:
             self.state_dict[f"up_blocks.{block_id}.attentions.{layer_id}.{suffix}"] = tensor
 
-    def _get_resnet_mapping(self, suffix: str) -> str:
-        for old, new in self._RESNET_MAPPING:
-            suffix = suffix.replace(old, new)
-        return suffix
 
-
-class AutoencoderKL:
+class AutoencoderKL(Mapping):
     _DIRECT_MAPPING: dict[str, str] = {
         "encoder.conv_in.weight": "encoder.conv_in.weight",
         "encoder.conv_in.bias": "encoder.conv_in.bias",
@@ -181,26 +191,26 @@ class AutoencoderKL:
         "post_quant_conv.weight": "post_quant_conv.weight",
         "post_quant_conv.bias": "post_quant_conv.bias",
     }
-    _RESNET_MAPPING: tuple[tuple[str, str], ...] = (
-        ("nin_shortcut", "conv_shortcut"),
-    )
-    _ATTENTION_MAPPING: tuple[tuple[str, str], ...] = (
-        ("norm.weight", "group_norm.weight"),
-        ("norm.bias", "group_norm.bias"),
-        ("q.weight", "to_q.weight"),
-        ("q.bias", "to_q.bias"),
-        ("k.weight", "to_k.weight"),
-        ("k.bias", "to_k.bias"),
-        ("v.weight", "to_v.weight"),
-        ("v.bias", "to_v.bias"),
-        ("proj_out.weight", "to_out.0.weight"),
-        ("proj_out.bias", "to_out.0.bias"),
-    )
-    state_dict: dict[str, torch.Tensor]
+    _RESNET_MAPPING: dict[str, str] = {
+        "nin_shortcut": "conv_shortcut",
+    }
+    _ATTENTION_MAPPING: dict[str, str] = {
+        "norm.weight": "group_norm.weight",
+        "norm.bias": "group_norm.bias",
+        "q.weight": "to_q.weight",
+        "q.bias": "to_q.bias",
+        "k.weight": "to_k.weight",
+        "k.bias": "to_k.bias",
+        "v.weight": "to_v.weight",
+        "v.bias": "to_v.bias",
+        "proj_out.weight": "to_out.0.weight",
+        "proj_out.bias": "to_out.0.bias",
+    }
+
 
     def __init__(self, orig_state_dict: dict[str, torch.Tensor]) -> None:
-        self.state_dict = {}
-        self._set_direct_mapping(orig_state_dict)
+        orig_state_dict = self.get_prefix_removed(orig_state_dict, "first_stage_model.")
+        self.state_dict = self.get_direct_mapping(orig_state_dict, self._DIRECT_MAPPING)
 
         for key, tensor in orig_state_dict.items():
             parts: list[str] = key.split(".")
@@ -211,21 +221,11 @@ class AutoencoderKL:
             elif key.startswith("decoder.up."):
                 self._set_up_block(parts, tensor)
 
-    def _set_direct_mapping(self, orig_state_dict: dict[str, torch.Tensor]) -> None:
-        keys: list[str] = list(orig_state_dict.keys())
-        for key in keys:
-            if key.startswith("first_stage_model."):
-                orig_state_dict[key.removeprefix("first_stage_model.")] = orig_state_dict.pop(key)
-
-        for old_key, new_key in self._DIRECT_MAPPING.items():
-            if old_key in orig_state_dict:
-                self.state_dict[new_key] = orig_state_dict[old_key]
-
     def _set_down_block(self, parts: list[str], tensor: torch.Tensor) -> None:
         block: int = int(parts[2])
 
         if parts[3] == "block":
-            suffix: str = self._get_resnet_mapping(4, parts)
+            suffix: str = self.get_mapping(".".join(parts[4:]), self._RESNET_MAPPING)
             self.state_dict[f"encoder.down_blocks.{block}.resnets.{suffix}"] = tensor
         elif parts[3] == "downsample":
             suffix: str = ".".join(parts[4:])
@@ -236,10 +236,10 @@ class AutoencoderKL:
 
         if parts[2].startswith("block_"):
             block: int = int(parts[2].removeprefix("block_")) - 1
-            suffix: str = self._get_resnet_mapping(3, parts)
+            suffix: str = self.get_mapping(".".join(parts[3:]), self._RESNET_MAPPING)
             self.state_dict[f"{prefix}.mid_block.resnets.{block}.{suffix}"] = tensor
         elif parts[2] == "attn_1":
-            suffix: str = self._get_attn_mapping(3, parts)
+            suffix: str = self.get_mapping(".".join(parts[3:]), self._ATTENTION_MAPPING)
             if suffix.endswith("weight") and tensor.ndim == 4:
                 tensor = tensor[:, :, 0, 0]
             elif suffix.endswith("weight") and tensor.ndim == 3:
@@ -251,35 +251,21 @@ class AutoencoderKL:
         block_id: int = 3 - block
 
         if parts[3] == "block":
-            suffix: str = self._get_resnet_mapping(4, parts)
+            suffix: str = self.get_mapping(".".join(parts[4:]), self._RESNET_MAPPING)
             self.state_dict[f"decoder.up_blocks.{block_id}.resnets.{suffix}"] = tensor
         elif parts[3] == "upsample":
             suffix: str = ".".join(parts[4:])
             self.state_dict[f"decoder.up_blocks.{block_id}.upsamplers.0.{suffix}"] = tensor
 
-    def _get_resnet_mapping(self, join: int, parts: list[str]) -> str:
-        suffix: str = ".".join(parts[join:])
-        for old, new in self._RESNET_MAPPING:
-            suffix = suffix.replace(old, new)
-        return suffix
 
-    def _get_attn_mapping(self, join: int, parts: list[str]) -> str:
-        suffix: str = ".".join(parts[join:])
-        for old, new in self._ATTENTION_MAPPING:
-            suffix = suffix.replace(old, new)
-        return suffix
-
-
-class CLIPTextModel:
-    state_dict: dict[str, torch.Tensor]
-
+class CLIPTextModel(Mapping):
     def __init__(self, orig_state_dict: dict[str, torch.Tensor]) -> None:
         self.state_dict = {}
         for key, tensor in orig_state_dict.items():
             self.state_dict[key.removeprefix("conditioner.embedders.0.transformer.")] = tensor
 
 
-class CLIPTextModelWithProjection:
+class CLIPTextModelWithProjection(Mapping):
     _DIRECT_MAPPING: dict[str, str] = {
         "positional_embedding": "text_model.embeddings.position_embedding.weight",
         "token_embedding.weight": "text_model.embeddings.token_embedding.weight",
@@ -287,28 +273,25 @@ class CLIPTextModelWithProjection:
         "ln_final.bias": "text_model.final_layer_norm.bias",
         "text_projection": "text_projection.weight",
     }
-    _TRANSFORMER_MAPPING: tuple[tuple[str, str], ...] = (
-        ("transformer.resblocks.", "text_model.encoder.layers."),
-        (".ln_1.", ".layer_norm1."),
-        (".ln_2.", ".layer_norm2."),
-        (".mlp.c_fc.", ".mlp.fc1."),
-        (".mlp.c_proj.", ".mlp.fc2."),
-        (".attn.out_proj.", ".self_attn.out_proj."),
-    )
-    state_dict: dict[str, torch.Tensor]
+    _TRANSFORMER_MAPPING: dict[str, str] = {
+        "transformer.resblocks.": "text_model.encoder.layers.",
+        ".ln_1.": ".layer_norm1.",
+        ".ln_2.": ".layer_norm2.",
+        ".mlp.c_fc.": ".mlp.fc1.",
+        ".mlp.c_proj.": ".mlp.fc2.",
+        ".attn.out_proj.": ".self_attn.out_proj.",
+    }
+
 
     def __init__(self, orig_state_dict: dict[str, torch.Tensor]) -> None:
-        self.state_dict = {}
-        for key, tensor in orig_state_dict.items():
-            key = key.removeprefix("conditioner.embedders.1.model.")
+        orig_state_dict = self.get_prefix_removed(orig_state_dict, "conditioner.embedders.1.model.")
+        self.state_dict = self.get_direct_mapping(orig_state_dict, self._DIRECT_MAPPING)
 
-            if key in self._DIRECT_MAPPING:
-                self.state_dict[self._DIRECT_MAPPING[key]] = tensor
-            elif ".attn.in_proj_" in key:
+        for key, tensor in orig_state_dict.items():
+            if ".attn.in_proj_" in key:
                 self._set_attention(key, tensor)
             elif key.startswith("transformer.resblocks."):
-                for old, new in self._TRANSFORMER_MAPPING:
-                    key = key.replace(old, new)
+                key = self.get_mapping(key, self._TRANSFORMER_MAPPING)
                 self.state_dict[key] = tensor
 
     def _set_attention(self, key: str, tensor: torch.Tensor) -> None:
